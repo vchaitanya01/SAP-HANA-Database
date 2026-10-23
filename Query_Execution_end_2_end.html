@@ -1,0 +1,1605 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SAP HANA Persistence Mechanism & Lifecycle Simulator</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            fiori: {
+              navy: '#060a12',
+              surface: '#0b1324',
+              card: '#111b33',
+              border: '#1e2d4a',
+              hover: '#25375c',
+              column: '#06b6d4',     // Cyan/Teal: Column Store
+              columnDark: '#083344',
+              row: '#f59e0b',        // Amber: Row Store
+              rowDark: '#451a03',
+              commit: '#10b981',     // Emerald: Redo Log & WAL
+              commitDark: '#064e3b',
+              savepoint: '#8b5cf6',  // Violet: Savepoint & Converter
+              savepointDark: '#2e1065',
+              disk: '#3b82f6',       // Blue: Persistence Volumes
+              accent: '#38bdf8'
+            }
+          },
+          fontFamily: {
+            sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+            mono: ['JetBrains Mono', 'Fira Code', 'Consolas', 'monospace']
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #060a12; }
+    ::-webkit-scrollbar-thumb { background: #1e2d4a; border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: #2d416b; }
+
+    /* Animated dash for pipeline flows */
+    @keyframes flowCycle {
+      from { stroke-dashoffset: 48; }
+      to { stroke-dashoffset: 0; }
+    }
+    .flow-active {
+      stroke-dasharray: 6 6;
+      animation: flowCycle 1.2s linear infinite;
+    }
+    .flow-active-fast {
+      stroke-dasharray: 5 5;
+      animation: flowCycle 0.6s linear infinite;
+    }
+
+    /* Glow utility styles */
+    .glow-cyan { filter: drop-shadow(0 0 10px rgba(6, 182, 212, 0.45)); }
+    .glow-amber { filter: drop-shadow(0 0 10px rgba(245, 158, 11, 0.45)); }
+    .glow-emerald { filter: drop-shadow(0 0 10px rgba(16, 185, 129, 0.5)); }
+    .glow-violet { filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.5)); }
+
+    /* Subtle pulse */
+    @keyframes subtlePulse {
+      0%, 100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.02); opacity: 0.92; }
+    }
+    .pulse-node { animation: subtlePulse 2.4s ease-in-out infinite; }
+  </style>
+</head>
+<body class="bg-fiori-navy text-slate-100 min-h-screen flex flex-col font-sans antialiased selection:bg-cyan-500/30 selection:text-cyan-200">
+
+  <!-- ======================================================== -->
+  <!-- TOP APPLICATION HEADER                                   -->
+  <!-- ======================================================== -->
+  <header class="border-b border-fiori-border bg-slate-950/90 backdrop-blur sticky top-0 z-50 px-4 lg:px-8 py-3">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center space-x-3.5">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-cyan-600 via-violet-600 to-emerald-500 flex items-center justify-center shadow-lg shadow-cyan-500/20 ring-1 ring-cyan-400/30">
+          <i data-lucide="database-zap" class="w-5 h-5 text-white"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base sm:text-lg font-bold tracking-tight text-white flex items-center gap-2">
+              SAP HANA Persistence & Memory Architecture
+              <span class="text-[11px] px-2 py-0.5 rounded font-mono font-semibold bg-cyan-950/90 border border-cyan-800 text-cyan-400">RAM-to-Disk Deep Dive</span>
+            </h1>
+          </div>
+          <p class="text-xs text-slate-400">Write-Ahead Logging (WAL), Shadow Paging, Asynchronous Savepoints & Delta Merge Pipeline</p>
+        </div>
+      </div>
+
+      <!-- Navigation Tabs -->
+      <nav class="flex items-center gap-1.5 bg-slate-900/90 p-1 rounded-xl border border-fiori-border text-xs">
+        <button id="nav-btn-simulator" onclick="switchNavTab('simulator')" class="px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 bg-cyan-600 text-white shadow-sm transition">
+          <i data-lucide="play-circle" class="w-4 h-4"></i>
+          <span>Live Pipeline Simulator</span>
+        </button>
+        <button id="nav-btn-comparison" onclick="switchNavTab('comparison')" class="px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 text-slate-300 hover:text-white transition">
+          <i data-lucide="columns-2" class="w-4 h-4"></i>
+          <span>Row vs Column Persistence</span>
+        </button>
+        <button id="nav-btn-recovery" onclick="switchNavTab('recovery')" class="px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 text-slate-300 hover:text-white transition">
+          <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+          <span>Restart & Crash Replay</span>
+        </button>
+        <button id="nav-btn-catalog" onclick="switchNavTab('catalog')" class="px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 text-slate-300 hover:text-white transition">
+          <i data-lucide="table" class="w-4 h-4"></i>
+          <span>System Views (M_*)</span>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <!-- ======================================================== -->
+  <!-- REAL-TIME STATUS & ENGINE TELEMETRY BAR                 -->
+  <!-- ======================================================== -->
+  <section class="bg-fiori-surface/80 border-b border-fiori-border px-4 lg:px-8 py-2.5">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
+      
+      <!-- Live Metrics Indicators -->
+      <div class="flex flex-wrap items-center gap-4 text-slate-300">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>Engine Status: <strong class="text-emerald-400">ACTIVE (ACID Durability Secured)</strong></span>
+        </div>
+        <span class="text-slate-600">|</span>
+        <div class="flex items-center gap-1.5">
+          <i data-lucide="clock" class="w-3.5 h-3.5 text-violet-400"></i>
+          <span>Last Savepoint: <strong id="telemetry-savepoint-time" class="text-violet-300">42s ago</strong> (<span id="telemetry-savepoint-counter">SP# 8412</span>)</span>
+        </div>
+        <span class="text-slate-600">|</span>
+        <div class="flex items-center gap-1.5">
+          <i data-lucide="hard-drive" class="w-3.5 h-3.5 text-cyan-400"></i>
+          <span>Dirty Buffer Pages: <strong id="telemetry-dirty-pages" class="text-amber-400">14 Pages (56 KB)</strong></span>
+        </div>
+        <span class="text-slate-600">|</span>
+        <div class="flex items-center gap-1.5">
+          <i data-lucide="file-text" class="w-3.5 h-3.5 text-emerald-400"></i>
+          <span>Active Redo Log LSN: <strong id="telemetry-lsn" class="text-emerald-300">0x004F8A21</strong></span>
+        </div>
+      </div>
+
+      <!-- Quick Action Controls -->
+      <div class="flex items-center gap-2">
+        <button onclick="triggerManualSavepoint()" class="px-2.5 py-1 rounded bg-violet-950/80 hover:bg-violet-900 border border-violet-700 text-violet-200 transition flex items-center gap-1 text-[11px]">
+          <i data-lucide="camera" class="w-3 h-3 text-violet-400"></i>
+          <span>Flush Savepoint Now</span>
+        </button>
+        <button onclick="resetSimulation()" class="px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 transition flex items-center gap-1 text-[11px]">
+          <i data-lucide="rotate-ccw" class="w-3 h-3"></i>
+          <span>Reset Counters</span>
+        </button>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ======================================================== -->
+  <!-- MAIN APPLICATION VIEWPORT                                -->
+  <!-- ======================================================== -->
+  <main class="flex-1 max-w-7xl mx-auto px-4 lg:px-8 py-5 w-full space-y-6">
+
+    <!-- ======================================================== -->
+    <!-- TAB 1: LIVE DATA FLOW SIMULATOR                          -->
+    <!-- ======================================================== -->
+    <div id="tab-simulator" class="space-y-6">
+
+      <!-- Interactive Scenario Launchpad -->
+      <div class="bg-fiori-card border border-fiori-border rounded-2xl p-4 sm:p-5 shadow-xl">
+        <div class="flex flex-col md:flex-row md:items-center justify-between gap-3 mb-4 pb-3 border-b border-fiori-border">
+          <div>
+            <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <i data-lucide="play-circle" class="w-4 h-4 text-cyan-400"></i>
+              Interactive Lifecycle & Workload Injector
+            </h2>
+            <p class="text-xs text-slate-400">Select an INSERT scenario or type custom SQL to trace the journey from RAM buffer to `/hana/log` & `/hana/data`</p>
+          </div>
+          <div class="flex items-center gap-2 text-xs font-mono">
+            <span class="text-slate-400">Simulation Speed:</span>
+            <select id="sim-speed" class="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 text-xs">
+              <option value="1">Normal (1x)</option>
+              <option value="1.5" selected>Fast (1.5x)</option>
+              <option value="0.5">Slow-Motion (0.5x)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Preset Action Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+          
+          <!-- Preset 1: Column Store INSERT -->
+          <button onclick="runScenario('insert_column')" class="p-3 text-left rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-cyan-500/60 transition group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between gap-1 mb-1.5">
+                <span class="text-xs font-bold text-cyan-300 group-hover:text-cyan-200 flex items-center gap-1.5">
+                  <i data-lucide="layers" class="w-3.5 h-3.5 text-cyan-400"></i>
+                  1. CS INSERT
+                </span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">Delta Store</span>
+              </div>
+              <p class="text-[11px] text-slate-400 leading-snug">
+                INSERT into <strong>ACDOCA / BSEG</strong>. Writes to write-optimized Delta 1 in RAM + synchronous Log Buffer commit.
+              </p>
+            </div>
+            <span class="text-[10px] font-mono text-cyan-400 mt-2.5 flex items-center gap-1">Simulate Write →</span>
+          </button>
+
+          <!-- Preset 2: Row Store INSERT -->
+          <button onclick="runScenario('insert_row')" class="p-3 text-left rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-amber-500/60 transition group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between gap-1 mb-1.5">
+                <span class="text-xs font-bold text-amber-300 group-hover:text-amber-200 flex items-center gap-1.5">
+                  <i data-lucide="table" class="w-3.5 h-3.5 text-amber-400"></i>
+                  2. RS INSERT
+                </span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-800">Row Segment</span>
+              </div>
+              <p class="text-[11px] text-slate-400 leading-snug">
+                INSERT into <strong>NRIV / USR02</strong>. Writes to linked memory segments + direct pointer updates in Row Engine memory.
+              </p>
+            </div>
+            <span class="text-[10px] font-mono text-amber-400 mt-2.5 flex items-center gap-1">Simulate Write →</span>
+          </button>
+
+          <!-- Preset 3: Batch Commit & Savepoint -->
+          <button onclick="runScenario('trigger_savepoint')" class="p-3 text-left rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-violet-500/60 transition group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between gap-1 mb-1.5">
+                <span class="text-xs font-bold text-violet-300 group-hover:text-violet-200 flex items-center gap-1.5">
+                  <i data-lucide="camera" class="w-3.5 h-3.5 text-violet-400"></i>
+                  3. Savepoint Flush
+                </span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-violet-950 text-violet-300 border border-violet-800">Shadow Paging</span>
+              </div>
+              <p class="text-[11px] text-slate-400 leading-snug">
+                Flushes all dirty RAM pages to <code>/hana/data</code> without blocking read/writes. Updates Converter map.
+              </p>
+            </div>
+            <span class="text-[10px] font-mono text-violet-400 mt-2.5 flex items-center gap-1">Trigger Savepoint →</span>
+          </button>
+
+          <!-- Preset 4: Delta Merge Execution -->
+          <button onclick="runScenario('delta_merge')" class="p-3 text-left rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-emerald-500/60 transition group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between gap-1 mb-1.5">
+                <span class="text-xs font-bold text-emerald-300 group-hover:text-emerald-200 flex items-center gap-1.5">
+                  <i data-lucide="git-merge" class="w-3.5 h-3.5 text-emerald-400"></i>
+                  4. Delta Merge
+                </span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-800">Delta 1 → Main 2</span>
+              </div>
+              <p class="text-[11px] text-slate-400 leading-snug">
+                Merges uncompressed Delta 1 into compressed, sorted Main 2. Swaps active delta to Delta 2.
+              </p>
+            </div>
+            <span class="text-[10px] font-mono text-emerald-400 mt-2.5 flex items-center gap-1">Execute Merge →</span>
+          </button>
+
+          <!-- Preset 5: Crash & Restart Recovery -->
+          <button onclick="runScenario('crash_recovery')" class="p-3 text-left rounded-xl bg-slate-900/90 hover:bg-slate-800/90 border border-slate-800 hover:border-rose-500/60 transition group flex flex-col justify-between">
+            <div>
+              <div class="flex items-center justify-between gap-1 mb-1.5">
+                <span class="text-xs font-bold text-rose-300 group-hover:text-rose-200 flex items-center gap-1.5">
+                  <i data-lucide="zap-off" class="w-3.5 h-3.5 text-rose-400"></i>
+                  5. Crash Recovery
+                </span>
+                <span class="text-[9px] font-mono px-1.5 py-0.5 rounded bg-rose-950 text-rose-300 border border-rose-800">Redo Replay</span>
+              </div>
+              <p class="text-[11px] text-slate-400 leading-snug">
+                Simulates host kill/power crash. Restores state from Last Savepoint + Replays committed Redo Logs.
+              </p>
+            </div>
+            <span class="text-[10px] font-mono text-rose-400 mt-2.5 flex items-center gap-1">Crash & Replay →</span>
+          </button>
+
+        </div>
+
+        <!-- Custom SQL Command Sandbox -->
+        <div class="mt-4 pt-3 border-t border-fiori-border flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+          <div class="flex-1 relative">
+            <span class="absolute inset-y-0 left-3 flex items-center pointer-events-none text-slate-500 font-mono text-xs">SQL&gt;</span>
+            <input id="input-custom-sql" type="text" value="INSERT INTO ACDOCA (RCLNT, RYEAR, DOCNR, BUKRS, AMOUNT) VALUES ('100', '2026', '940001', '1000', 4500.00);" class="w-full bg-slate-950 border border-slate-700 rounded-lg pl-12 pr-4 py-2 font-mono text-xs text-cyan-300 focus:outline-none focus:border-cyan-500 shadow-inner">
+          </div>
+          <button onclick="executeCustomSQL()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 font-semibold rounded-lg text-white text-xs transition flex items-center justify-center gap-1.5 shadow-md shadow-cyan-600/20">
+            <i data-lucide="terminal" class="w-3.5 h-3.5"></i>
+            <span>Execute & Trace</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Exploded Architecture Canvas & Dynamic Pipeline -->
+      <div class="bg-fiori-card border border-fiori-border rounded-2xl p-5 shadow-xl relative overflow-hidden">
+        
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div>
+            <h3 class="text-sm font-bold text-white tracking-wider uppercase flex items-center gap-2">
+              <i data-lucide="workflow" class="w-4 h-4 text-emerald-400"></i>
+              Real-Time Persistence Architecture Flow (RAM $\rightarrow$ WAL $\rightarrow$ Data Volumes)
+            </h3>
+            <p class="text-xs text-slate-400">Step-by-step transaction lifecycle highlighting ACID durability guarantees and shadow block writes</p>
+          </div>
+          <div id="pipeline-status-badge" class="px-3 py-1 rounded-full text-xs font-mono font-semibold bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center gap-1.5">
+            <span class="w-2 h-2 rounded-full bg-emerald-400"></span>
+            <span id="pipeline-status-text">Pipeline Idle - Ready for SQL</span>
+          </div>
+        </div>
+
+        <!-- Interactive SVG Diagram Canvas -->
+        <div class="w-full overflow-x-auto bg-slate-950/70 border border-slate-800 rounded-xl p-3 sm:p-4">
+          <svg id="architecture-svg" viewBox="0 0 1020 540" class="w-full min-w-[900px] h-auto select-none font-mono">
+            <defs>
+              <!-- Arrow marker definitions -->
+              <marker id="arrow-cyan" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#06b6d4" />
+              </marker>
+              <marker id="arrow-amber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f59e0b" />
+              </marker>
+              <marker id="arrow-emerald" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#10b981" />
+              </marker>
+              <marker id="arrow-violet" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#8b5cf6" />
+              </marker>
+              <marker id="arrow-slate" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#64748b" />
+              </marker>
+              <!-- Gradients -->
+              <linearGradient id="grad-ram" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#0f172a" />
+                <stop offset="100%" stop-color="#1e293b" />
+              </linearGradient>
+              <linearGradient id="grad-disk" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#090d16" />
+                <stop offset="100%" stop-color="#111827" />
+              </linearGradient>
+            </defs>
+
+            <!-- ============================================== -->
+            <!-- SECTION 1: CLIENT & EXECUTION LAYER             -->
+            <!-- ============================================== -->
+            <g id="node-client" class="transition-all duration-300">
+              <rect x="20" y="30" width="160" height="90" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+              <text x="35" y="55" fill="#94a3b8" font-size="10" font-weight="bold">STAGE 1: APPLICATION</text>
+              <text x="35" y="75" fill="#f8fafc" font-size="12" font-weight="bold">Client / ABAP Work Process</text>
+              <text x="35" y="95" fill="#64748b" font-size="10">JDBC / SQL Statement</text>
+            </g>
+
+            <g id="node-engine" class="transition-all duration-300">
+              <rect x="230" y="30" width="170" height="90" rx="10" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+              <text x="245" y="55" fill="#94a3b8" font-size="10" font-weight="bold">STAGE 2: QUERY PROCESSOR</text>
+              <text x="245" y="75" fill="#f8fafc" font-size="12" font-weight="bold">SQL Parser & Exec Engine</text>
+              <text x="245" y="95" fill="#64748b" font-size="10">Session & Transaction Context</text>
+            </g>
+
+            <!-- ============================================== -->
+            <!-- SECTION 2: RAM BOUNDARY (INDEXSERVER MEMORY)    -->
+            <!-- ============================================== -->
+            <rect x="20" y="150" width="980" height="195" rx="16" fill="url(#grad-ram)" stroke="#334155" stroke-width="1.5" stroke-dasharray="4 4" />
+            <text x="40" y="175" fill="#38bdf8" font-size="12" font-weight="bold">MAIN MEMORY (RAM) - SAP HANA INDEXSERVER PROCESS</text>
+            <text x="760" y="175" fill="#94a3b8" font-size="10">Active Working Footprint & Buffer Cache</text>
+
+            <!-- Column Store Delta Buffer -->
+            <g id="node-cs-delta" class="transition-all duration-300">
+              <rect x="40" y="195" width="220" height="130" rx="10" fill="#083344" stroke="#06b6d4" stroke-width="1.5" />
+              <text x="55" y="220" fill="#38bdf8" font-size="11" font-weight="bold">COLUMN STORE: DELTA 1</text>
+              <text x="55" y="238" fill="#e2e8f0" font-size="10">Write-Optimized Memory Structure</text>
+              <text x="55" y="256" fill="#94a3b8" font-size="9">• Uncompressed / Lightly compressed</text>
+              <text x="55" y="272" fill="#94a3b8" font-size="9">• Optimized for concurrent INSERTs</text>
+              <text x="55" y="288" fill="#94a3b8" font-size="9">• Appends new row tuples instantly</text>
+              <rect x="55" y="298" width="190" height="16" rx="4" fill="#0e7490" />
+              <text id="svg-delta-counter" x="65" y="310" fill="#cffafe" font-size="9">Delta Records: 1,420 rows</text>
+            </g>
+
+            <!-- Row Store Memory Segment -->
+            <g id="node-rs-mem" class="transition-all duration-300">
+              <rect x="280" y="195" width="210" height="130" rx="10" fill="#451a03" stroke="#f59e0b" stroke-width="1.5" />
+              <text x="295" y="220" fill="#fcd34d" font-size="11" font-weight="bold">ROW STORE MEMORY</text>
+              <text x="295" y="238" fill="#e2e8f0" font-size="10">Linked Page Segments (Row Engine)</text>
+              <text x="295" y="256" fill="#94a3b8" font-size="9">• Fixed-size tuple slot pointers</text>
+              <text x="295" y="272" fill="#94a3b8" font-size="9">• In-place memory page updates</text>
+              <text x="295" y="288" fill="#94a3b8" font-size="9">• Segment Free List tracking</text>
+              <rect x="295" y="298" width="180" height="16" rx="4" fill="#b45309" />
+              <text id="svg-row-counter" x="305" y="310" fill="#fef3c7" font-size="9">RS Segment Load: 78.4 MB</text>
+            </g>
+
+            <!-- In-Memory Redo Log Buffer -->
+            <g id="node-log-buffer" class="transition-all duration-300">
+              <rect x="510" y="195" width="230" height="130" rx="10" fill="#064e3b" stroke="#10b981" stroke-width="1.5" />
+              <text x="525" y="220" fill="#6ee7b7" font-size="11" font-weight="bold">IN-MEMORY LOG BUFFER</text>
+              <text x="525" y="238" fill="#e2e8f0" font-size="10">Write-Ahead Logging (WAL) Ring</text>
+              <text x="525" y="256" fill="#94a3b8" font-size="9">• 8 x 16 MB segmented circular rings</text>
+              <text x="525" y="272" fill="#94a3b8" font-size="9">• Holds uncommitted & committed LSNs</text>
+              <text x="525" y="288" fill="#94a3b8" font-size="9">• Logger thread flushes on COMMIT</text>
+              <rect x="525" y="298" width="200" height="16" rx="4" fill="#047857" />
+              <text id="svg-logbuf-counter" x="535" y="310" fill="#d1fae5" font-size="9">Active Buffer: Ring #2 (4.2 MB)</text>
+            </g>
+
+            <!-- Page Converter & Page Management -->
+            <g id="node-converter" class="transition-all duration-300">
+              <rect x="760" y="195" width="220" height="130" rx="10" fill="#2e1065" stroke="#8b5cf6" stroke-width="1.5" />
+              <text x="775" y="220" fill="#c4b5fd" font-size="11" font-weight="bold">PAGE CONVERTER (RAM)</text>
+              <text x="775" y="238" fill="#e2e8f0" font-size="10">Logical $\rightarrow$ Physical Block Map</text>
+              <text x="775" y="256" fill="#94a3b8" font-size="9">• Tracks logical Page IDs</text>
+              <text x="775" y="272" fill="#94a3b8" font-size="9">• Maps to Physical Block IDs on disk</text>
+              <text x="775" y="288" fill="#94a3b8" font-size="9">• Powers Shadow Paging mechanism</text>
+              <rect x="775" y="298" width="190" height="16" rx="4" fill="#6d28d9" />
+              <text id="svg-converter-status" x="785" y="310" fill="#ede9fe" font-size="9">Converter Map: Version 8412</text>
+            </g>
+
+            <!-- ============================================== -->
+            <!-- SECTION 3: PERSISTENCE LAYER (DISK STORAGE)     -->
+            <!-- ============================================== -->
+            <rect x="20" y="370" width="980" height="150" rx="16" fill="url(#grad-disk)" stroke="#1e293b" stroke-width="1.5" />
+            <text x="40" y="395" fill="#60a5fa" font-size="12" font-weight="bold">PERSISTENCE STORAGE LAYER (NON-VOLATILE DISK VOLUMES)</text>
+            <text x="780" y="395" fill="#94a3b8" font-size="10">SSD / NVMe / SAN Storage</text>
+
+            <!-- Redo Log Volume (/hana/log) -->
+            <g id="node-hana-log" class="transition-all duration-300">
+              <rect x="40" y="410" width="450" height="95" rx="10" fill="#022c22" stroke="#059669" stroke-width="1.5" />
+              <text x="55" y="432" fill="#34d399" font-size="11" font-weight="bold">/hana/log (REDO LOG VOLUMES)</text>
+              <text x="55" y="450" fill="#e2e8f0" font-size="10">Synchronous I/O | Direct I/O (Bypasses OS Page Cache)</text>
+              <text x="55" y="468" fill="#94a3b8" font-size="9">• Writes sequential log segments (default 512 MB per segment)</text>
+              <text x="55" y="484" fill="#94a3b8" font-size="9">• `fsync` call completes here BEFORE client receives COMMIT ACK</text>
+            </g>
+
+            <!-- Data Volume (/hana/data) -->
+            <g id="node-hana-data" class="transition-all duration-300">
+              <rect x="530" y="410" width="450" height="95" rx="10" fill="#1e1b4b" stroke="#6366f1" stroke-width="1.5" />
+              <text x="545" y="432" fill="#a5b4fc" font-size="11" font-weight="bold">/hana/data (DATA VOLUMES & SHADOW BLOCKS)</text>
+              <text x="545" y="450" fill="#e2e8f0" font-size="10">Asynchronous I/O | Written strictly during Savepoint Cycles</text>
+              <text x="545" y="468" fill="#94a3b8" font-size="9">• Shadow Paging: Dirty blocks written to unallocated disk blocks</text>
+              <text x="545" y="484" fill="#94a3b8" font-size="9">• Never overwrites existing active blocks in-place during runtime</text>
+            </g>
+
+            <!-- ============================================== -->
+            <!-- DYNAMIC CONNECTING PATHS & FLOW LINES          -->
+            <!-- ============================================== -->
+            <!-- Path 1: Client -> Engine -->
+            <path id="path-sql-in" d="M 180 75 L 230 75" stroke="#64748b" stroke-width="2" marker-end="url(#arrow-slate)" fill="none" />
+
+            <!-- Path 2: Engine -> Column Store Delta -->
+            <path id="path-engine-cs" d="M 270 120 L 270 155 L 150 155 L 150 195" stroke="#06b6d4" stroke-width="2" marker-end="url(#arrow-cyan)" fill="none" />
+
+            <!-- Path 3: Engine -> Row Store Mem -->
+            <path id="path-engine-rs" d="M 330 120 L 330 195" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrow-amber)" fill="none" />
+
+            <!-- Path 4: Engine / RAM -> Log Buffer (WAL) -->
+            <path id="path-to-wal" d="M 400 75 L 625 75 L 625 195" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-emerald)" fill="none" />
+
+            <!-- Path 5: Log Buffer -> /hana/log (SYNCHRONOUS COMMIT FLUSH) -->
+            <path id="path-wal-flush" d="M 590 325 L 590 365 L 265 365 L 265 410" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrow-emerald)" fill="none" />
+
+            <!-- Path 6: Commit Ack: /hana/log -> Client -->
+            <path id="path-commit-ack" d="M 100 410 L 100 120" stroke="#10b981" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-emerald)" fill="none" />
+
+            <!-- Path 7: Savepoint Coordinator -> Data Volumes (/hana/data) -->
+            <path id="path-savepoint-flush" d="M 870 325 L 870 410" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arrow-violet)" fill="none" />
+
+            <!-- Path 8: RAM Dirty Pages -> Converter -->
+            <path id="path-dirty-to-converter" d="M 260 250 L 760 250" stroke="#8b5cf6" stroke-width="1.5" stroke-dasharray="3 3" marker-end="url(#arrow-violet)" fill="none" />
+
+            <!-- Dynamic Floating Particle Packet -->
+            <circle id="flow-particle" cx="-20" cy="-20" r="6" fill="#38bdf8" class="hidden glow-cyan">
+              <animate attributeName="r" values="5;8;5" dur="1s" repeatCount="indefinite" />
+            </circle>
+
+          </svg>
+        </div>
+
+        <!-- Live Step Timeline & Explanation Ticker -->
+        <div class="mt-4 grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+          <div class="md:col-span-8 bg-slate-900/90 border border-slate-800 rounded-xl p-3 flex items-start gap-3">
+            <div id="step-icon-box" class="p-2 rounded-lg bg-cyan-950 text-cyan-400 border border-cyan-800 shrink-0">
+              <i id="step-icon" data-lucide="info" class="w-4 h-4"></i>
+            </div>
+            <div>
+              <div class="flex items-center gap-2 mb-0.5">
+                <span id="step-number-tag" class="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-900/70 text-cyan-300 font-bold">READY</span>
+                <span id="step-title" class="text-xs font-bold text-white">System Idle - Waiting for Transaction</span>
+              </div>
+              <p id="step-description" class="text-xs text-slate-400 leading-relaxed">
+                Click a preset workload above or type an INSERT SQL command to observe the step-by-step memory mutation, redo log generation, client commit acknowledgment, and shadow paging to persistence disk volumes.
+              </p>
+            </div>
+          </div>
+
+          <!-- Step Progression Navigator -->
+          <div class="md:col-span-4 flex items-center justify-end gap-2 bg-slate-900/90 border border-slate-800 rounded-xl p-2.5">
+            <button id="btn-step-prev" onclick="manualStepChange(-1)" disabled class="px-2.5 py-1.5 rounded bg-slate-800 text-slate-400 text-xs font-mono disabled:opacity-40 disabled:cursor-not-allowed hover:text-white flex items-center gap-1">
+              <i data-lucide="chevron-left" class="w-3.5 h-3.5"></i> Prev
+            </button>
+            <span id="step-progress-label" class="text-xs font-mono text-cyan-300 px-2 font-bold">Step 0 / 6</span>
+            <button id="btn-step-next" onclick="manualStepChange(1)" disabled class="px-2.5 py-1.5 rounded bg-cyan-600 text-white text-xs font-mono disabled:opacity-40 disabled:cursor-not-allowed hover:bg-cyan-500 flex items-center gap-1">
+              Next <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+            </button>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 2: ROW STORE VS COLUMN STORE COMPARISON              -->
+    <!-- ======================================================== -->
+    <div id="tab-comparison" class="hidden space-y-6">
+
+      <!-- Architectural Deep Dive Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+
+        <!-- Column Store Persistence Card -->
+        <div class="bg-fiori-card border border-cyan-900/50 rounded-2xl p-5 space-y-4 shadow-xl">
+          <div class="flex items-center justify-between pb-3 border-b border-cyan-950">
+            <div class="flex items-center gap-2.5">
+              <div class="p-2 rounded-xl bg-cyan-950 text-cyan-400 border border-cyan-800">
+                <i data-lucide="layers" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h3 class="text-sm font-bold text-white">Column Store Architecture (OLAP + OLTP)</h3>
+                <span class="text-[11px] font-mono text-cyan-400">Tables: ACDOCA, BSEG, VBAP, MATDOC</span>
+              </div>
+            </div>
+            <span class="text-xs font-mono px-2 py-0.5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800">Dual-Buffer Model</span>
+          </div>
+
+          <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-cyan-300 flex items-center gap-1">
+                <i data-lucide="cpu" class="w-3.5 h-3.5"></i> 1. RAM Dual-Storage Engine: Main + Delta
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                Column Store relies on two memory buffers:
+                <br>• <strong>Main Storage:</strong> Heavily compressed (dictionary encoding, prefix coding, run-length), sorted, and read-optimized. Highly expensive to write in-place.
+                <br>• <strong>Delta Storage:</strong> Lightly compressed, write-optimized buffer that receives all transactional <code>INSERT</code>, <code>UPDATE</code>, and <code>DELETE</code> operations immediately.
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-cyan-300 flex items-center gap-1">
+                <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i> 2. Persistence to `/hana/data`
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                • During a <strong>Savepoint</strong>, dirty pages from both Delta and Main storage are flushed to the data volume using shadow paging.
+                <br>• <strong>Delta Merge Process:</strong> An asynchronous background process that merges Delta 1 + Main 1 $\rightarrow$ fresh compressed Main 2, resetting the delta memory footprint.
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-cyan-300 flex items-center gap-1">
+                <i data-lucide="file-text" class="w-3.5 h-3.5"></i> 3. Redo Log Characteristics
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                • WAL log entries contain raw columnar value descriptors, value IDs, and row position IDs.
+                <br>• Upon system crash, replay populates the Delta Store in RAM up to the last committed LSN.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row Store Persistence Card -->
+        <div class="bg-fiori-card border border-amber-900/50 rounded-2xl p-5 space-y-4 shadow-xl">
+          <div class="flex items-center justify-between pb-3 border-b border-amber-950">
+            <div class="flex items-center gap-2.5">
+              <div class="p-2 rounded-xl bg-amber-950 text-amber-400 border border-amber-800">
+                <i data-lucide="table" class="w-5 h-5"></i>
+              </div>
+              <div>
+                <h3 class="text-sm font-bold text-white">Row Store Architecture (Pure OLTP)</h3>
+                <span class="text-[11px] font-mono text-amber-400">Tables: NRIV, USR02, System Catalog, Locking</span>
+              </div>
+            </div>
+            <span class="text-xs font-mono px-2 py-0.5 rounded bg-amber-950 text-amber-300 border border-amber-800">In-Place Segment Model</span>
+          </div>
+
+          <div class="space-y-3 text-xs leading-relaxed text-slate-300">
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-amber-300 flex items-center gap-1">
+                <i data-lucide="cpu" class="w-3.5 h-3.5"></i> 1. RAM Layout: Linked Page Segments
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                • Tuples are stored consecutively in 64 KB memory pages linked into table segments.
+                <br>• Fast primary key pointer lookups and instantaneous single-record writes.
+                <br>• Memory pages undergo in-place updates with multi-version concurrency control (MVCC) pointers for read consistency.
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-amber-300 flex items-center gap-1">
+                <i data-lucide="hard-drive" class="w-3.5 h-3.5"></i> 2. Persistence to `/hana/data`
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                • <strong>Row Engine Converter:</strong> Translates Row Store memory page IDs directly into data volume disk blocks.
+                <br>• Savepoints flush all modified row store pages into shadow blocks on disk. No separate "Delta Merge" step is needed for Row Store.
+              </p>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5">
+              <span class="font-bold text-amber-300 flex items-center gap-1">
+                <i data-lucide="file-text" class="w-3.5 h-3.5"></i> 3. Redo Log Characteristics
+              </span>
+              <p class="text-slate-400 text-[11px]">
+                • WAL log entries contain physical row images or logical operation records (INSERT tuple values, DELETE record keys).
+                <br>• Crash restart requires 100% of Row Store tables to be loaded immediately into RAM during startup.
+              </p>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Comparison Matrix Table -->
+      <div class="bg-fiori-panel border border-fiori-border rounded-2xl p-5 shadow-xl overflow-x-auto">
+        <h3 class="text-sm font-bold text-white mb-3 uppercase tracking-wider flex items-center gap-2">
+          <i data-lucide="scale" class="w-4 h-4 text-cyan-400"></i>
+          Detailed Technical Comparison: Row Store vs Column Store Persistence
+        </h3>
+        <table class="w-full text-left text-xs font-mono">
+          <thead class="bg-slate-900 text-slate-400 border-b border-slate-800">
+            <tr>
+              <th class="p-3">Architectural Parameter</th>
+              <th class="p-3 text-amber-400">Row Store (RS)</th>
+              <th class="p-3 text-cyan-400">Column Store (CS)</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800/70 text-slate-300">
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Target Workload Profile</td>
+              <td class="p-3">High-throughput OLTP, point lookups, single-row writes</td>
+              <td class="p-3">Massive analytical aggregations, scans, enterprise business objects</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Immediate RAM Write Destination</td>
+              <td class="p-3">Row Store segment memory page slot</td>
+              <td class="p-3">Column Store Delta 1 memory buffer</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Memory Compression Method</td>
+              <td class="p-3">Uncompressed / Minimal page compaction</td>
+              <td class="p-3">Dictionary encoding, Run-length (RLE), Bit-packing (Main Store)</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">ACID Durability Anchor</td>
+              <td class="p-3">Redo Log flush to <code>/hana/log</code> via fsync</td>
+              <td class="p-3">Redo Log flush to <code>/hana/log</code> via fsync</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Savepoint Disk Write Unit</td>
+              <td class="p-3">Dirty 64 KB memory pages converted to data blocks</td>
+              <td class="p-3">Dirty Delta & Main pages persisted via shadow paging</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Background Merge Required?</td>
+              <td class="p-3 text-emerald-400">No (Continuous in-place management)</td>
+              <td class="p-3 text-cyan-400 font-bold">Yes (Delta Merge into compressed Main)</td>
+            </tr>
+            <tr class="hover:bg-slate-900/50">
+              <td class="p-3 font-semibold text-white">Database Startup / Restart Behavior</td>
+              <td class="p-3 text-amber-400 font-bold">Must load 100% of Row Store into RAM before opening</td>
+              <td class="p-3 text-emerald-400 font-bold">Lazy load (loads columns on-demand upon first query)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 3: CRASH RESTART & RECOVERY REPLAY TIMELINE          -->
+    <!-- ======================================================== -->
+    <div id="tab-recovery" class="hidden space-y-6">
+
+      <div class="bg-fiori-card border border-fiori-border rounded-2xl p-5 shadow-xl space-y-4">
+        <div>
+          <h2 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <i data-lucide="rotate-ccw" class="w-4 h-4 text-rose-400"></i>
+            Interactive Crash Recovery & Restart Timeline Replay
+          </h2>
+          <p class="text-xs text-slate-400">Understand the exact 3-phase restart sequence executed by SAP HANA indexserver following an unexpected crash or host power failure</p>
+        </div>
+
+        <!-- Interactive Phase Slider Controls -->
+        <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3">
+          <div class="flex justify-between items-center text-xs font-mono">
+            <span class="text-slate-300 font-bold">Restart Phase Scrub Controller:</span>
+            <span id="recovery-phase-indicator" class="px-2.5 py-0.5 rounded font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
+              Phase 1: Initialization & Savepoint Load
+            </span>
+          </div>
+
+          <input id="recovery-slider" type="range" min="1" max="3" step="1" value="1" oninput="scrubRecoveryPhase(this.value)" class="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+
+          <div class="grid grid-cols-3 text-center text-[11px] font-mono font-bold text-slate-400 pt-1">
+            <span id="rec-label-1" class="text-cyan-400">1. Savepoint Load</span>
+            <span id="rec-label-2">2. Redo Phase (Replay)</span>
+            <span id="rec-label-3">3. Undo Phase (Rollback)</span>
+          </div>
+        </div>
+
+        <!-- Dynamic Visual Recovery Box -->
+        <div id="recovery-card-content" class="p-5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3">
+          <!-- Dynamically populated by scrubRecoveryPhase() -->
+        </div>
+
+        <!-- Technical Crash FAQ Reference -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span class="font-bold text-emerald-400 flex items-center gap-1.5">
+              <i data-lucide="shield-check" class="w-3.5 h-3.5"></i> Why is Data Never Lost?
+            </span>
+            <p class="text-slate-400 leading-relaxed text-[11px]">
+              Even though the 5-minute savepoint hasn't run yet, all committed transactions reside in <code>/hana/log</code>. During Phase 2, the Redo Engine reads every log record newer than the last savepoint anchor and reconstructs the exact memory state.
+            </p>
+          </div>
+          <div class="p-3.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5">
+            <span class="font-bold text-rose-400 flex items-center gap-1.5">
+              <i data-lucide="alert-triangle" class="w-3.5 h-3.5"></i> What happens to In-Flight Transactions?
+            </span>
+            <p class="text-slate-400 leading-relaxed text-[11px]">
+              Transactions that were open and never issued a <code>COMMIT</code> before the power failure will have Redo entries replayed in Phase 2, but are immediately identified and discarded in Phase 3 (Undo Phase) to maintain strict consistency.
+            </p>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- ======================================================== -->
+    <!-- TAB 4: SYSTEM CATALOG (M_*) & REFERENCE INSPECTOR        -->
+    <!-- ======================================================== -->
+    <div id="tab-catalog" class="hidden space-y-6">
+
+      <!-- View Selector -->
+      <div class="flex flex-wrap items-center justify-between gap-3 bg-fiori-card border border-fiori-border p-4 rounded-xl">
+        <div class="flex items-center gap-2">
+          <span class="p-1.5 rounded-lg bg-cyan-950 text-cyan-400 border border-cyan-800">
+            <i data-lucide="database" class="w-4 h-4"></i>
+          </span>
+          <div>
+            <h3 class="text-sm font-bold text-white font-mono">SYS.M_* Persistence Dynamic Inspector</h3>
+            <p class="text-xs text-slate-400">Live simulated dictionary views synchronized with the persistence engine state</p>
+          </div>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2 text-xs">
+          <button onclick="renderCatalogTable('m_savepoints')" id="cat-btn-m-savepoints" class="px-2.5 py-1 rounded bg-cyan-600 text-white font-mono font-semibold transition">M_SAVEPOINTS</button>
+          <button onclick="renderCatalogTable('m_log_buffers')" id="cat-btn-m-log" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition">M_LOG_BUFFERS</button>
+          <button onclick="renderCatalogTable('m_volume_io')" id="cat-btn-m-io" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition">M_VOLUME_IO_TOTAL</button>
+          <button onclick="renderCatalogTable('m_delta_merge')" id="cat-btn-m-merge" class="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition">M_DELTA_MERGE_STATISTICS</button>
+        </div>
+      </div>
+
+      <!-- SQL Console & Output Table -->
+      <div class="bg-fiori-panel border border-fiori-border rounded-2xl p-5 space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div class="flex items-center gap-2">
+            <span class="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-400 border border-cyan-800">SYSTEM QUERY</span>
+            <span id="current-catalog-sql" class="text-xs font-mono text-emerald-400">SELECT * FROM SYS.M_SAVEPOINTS ORDER BY SAVEPOINT_ID DESC;</span>
+          </div>
+          <button onclick="copyCatalogSQL()" class="text-xs px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700 flex items-center gap-1 font-mono">
+            <i data-lucide="copy" class="w-3 h-3"></i> Copy SQL
+          </button>
+        </div>
+
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs font-mono">
+            <thead id="catalog-table-head" class="bg-slate-900 text-slate-400 border-b border-slate-800"></thead>
+            <tbody id="catalog-table-body" class="divide-y divide-slate-800/80 text-slate-300"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Vital SAP Notes Repository -->
+      <div class="bg-fiori-card border border-fiori-border rounded-2xl p-5 space-y-3">
+        <h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+          <i data-lucide="book-open" class="w-4 h-4 text-cyan-400"></i>
+          Essential SAP Support Notes for Persistence & Logging
+        </h3>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-mono">
+          <div class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1">
+            <span class="font-bold text-violet-400">SAP Note 2100009</span>
+            <div class="font-semibold text-slate-200">FAQ: SAP HANA Savepoints</div>
+            <p class="text-slate-400 text-[11px] leading-relaxed">Explains savepoint phases (Flushing, Critical Phase, Block Lock), converter checkpoints, and tuning savepoint intervals.</p>
+          </div>
+          <div class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1">
+            <span class="font-bold text-emerald-400">SAP Note 2082670</span>
+            <div class="font-semibold text-slate-200">FAQ: SAP HANA Redo Logs</div>
+            <p class="text-slate-400 text-[11px] leading-relaxed">Details log segment sizing (512 MB defaults), log buffer configuration, log backups, and resolving full <code>/hana/log</code> volumes.</p>
+          </div>
+          <div class="p-3 bg-slate-900/90 rounded-xl border border-slate-800 space-y-1">
+            <span class="font-bold text-cyan-400">SAP Note 2057046</span>
+            <div class="font-semibold text-slate-200">FAQ: SAP HANA Delta Merge</div>
+            <p class="text-slate-400 text-[11px] leading-relaxed">Deep dive into Auto-Merge triggers, Critical and Smart Merge guidelines, and investigating long-running table merges.</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Notification Toast -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 transform translate-y-20 opacity-0 transition-all duration-300 pointer-events-none bg-slate-900 border border-cyan-500/50 text-white px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-mono">
+    <i data-lucide="check-circle" class="w-4 h-4 text-cyan-400"></i>
+    <span id="toast-text">Action completed</span>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- SCRIPT ENGINE (STATE, SIMULATION & STEPPERS)             -->
+  <!-- ======================================================== -->
+  <script>
+    // Simulator Global State
+    const SIM = {
+      activeNav: 'simulator',
+      speedFactor: 1.5,
+      currentScenario: null,
+      currentStep: 0,
+      totalSteps: 6,
+      timer: null,
+
+      // Telemetry Counters
+      lsn: 5212705,
+      savepointId: 8412,
+      savepointElapsedSec: 42,
+      dirtyPages: 14,
+      dirtyBytesKB: 56,
+      csDeltaRows: 1420,
+      rsMemoryMB: 78.4,
+      activeLogRing: 2,
+      activeLogRingMB: 4.2,
+
+      // Catalog Data Mockups
+      savepoints: [
+        { id: 8412, durationSec: 1.8, flushedSizeMB: 184.2, criticalPhaseSec: 0.04, trigger: "SCHEDULED (300s)" },
+        { id: 8411, durationSec: 2.1, flushedSizeMB: 210.5, criticalPhaseSec: 0.05, trigger: "SCHEDULED (300s)" },
+        { id: 8410, durationSec: 3.4, flushedSizeMB: 395.1, criticalPhaseSec: 0.08, trigger: "MANUAL FLUSH" }
+      ],
+      logBuffers: [
+        { ringId: 1, state: "FREE", sizeMB: 16.0, writtenMB: 16.0, pendingFsync: "NO" },
+        { ringId: 2, state: "ACTIVE_WRITING", sizeMB: 16.0, writtenMB: 4.2, pendingFsync: "NO" },
+        { ringId: 3, state: "FLUSHED_COMMITTED", sizeMB: 16.0, writtenMB: 16.0, pendingFsync: "NO" },
+        { ringId: 4, state: "FREE", sizeMB: 16.0, writtenMB: 0.0, pendingFsync: "NO" }
+      ],
+      volumeIO: [
+        { volume: "/hana/log/mnt00001/hdb00003", type: "LOG", totalWritesMB: 42180, avgWriteLatencyMs: 0.38, ioPattern: "SYNCHRONOUS DIRECT_IO" },
+        { volume: "/hana/data/mnt00001/hdb00003", type: "DATA", totalWritesMB: 195400, avgWriteLatencyMs: 2.14, ioPattern: "ASYNCHRONOUS SHADOW_PAGE" }
+      ],
+      deltaMerges: [
+        { table: "ACDOCA", deltaRowsBefore: 842000, mainRowsAfter: 14200000, durationSec: 14.8, memoryPeakGB: 18.2, status: "SUCCESS" },
+        { table: "BSEG", deltaRowsBefore: 310000, mainRowsAfter: 6100000, durationSec: 8.2, memoryPeakGB: 9.4, status: "SUCCESS" }
+      ]
+    };
+
+    // Scenario Step Definitions
+    const SCENARIOS = {
+      insert_column: [
+        {
+          num: 1,
+          title: "SQL Execution & Memory Routing",
+          desc: "Application submits INSERT INTO ACDOCA. The SQL Execution Engine resolves table schema and routes tuple payload to the Column Store Delta Store buffer in RAM.",
+          activeNodes: ['node-client', 'node-engine', 'node-cs-delta'],
+          activePaths: ['path-sql-in', 'path-engine-cs'],
+          color: 'cyan',
+          action: () => {
+            SIM.csDeltaRows += 1;
+            SIM.dirtyPages += 2;
+            SIM.dirtyBytesKB += 8;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 2,
+          title: "Write-Ahead Log (WAL) Buffer Generation",
+          desc: "Before any change can be safely acknowledged, HANA constructs a Redo Log entry in the in-memory circular Log Buffer containing the logical columnar record and value IDs.",
+          activeNodes: ['node-cs-delta', 'node-log-buffer'],
+          activePaths: ['path-to-wal'],
+          color: 'emerald',
+          action: () => {
+            SIM.lsn += 1;
+            SIM.activeLogRingMB = parseFloat((SIM.activeLogRingMB + 0.1).toFixed(2));
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 3,
+          title: "Synchronous Log Flush to /hana/log (fsync)",
+          desc: "Upon transaction COMMIT, the dedicated Logger thread executes a synchronous direct I/O flush to `/hana/log` disk segments. ACID Durability is physically sealed here.",
+          activeNodes: ['node-log-buffer', 'node-hana-log'],
+          activePaths: ['path-wal-flush'],
+          color: 'emerald',
+          action: () => {}
+        },
+        {
+          num: 4,
+          title: "Client Commit Confirmation (ACK)",
+          desc: "The database confirms success to the client application. Notice: The dirty data pages are STILL only in RAM; they have NOT been written to /hana/data yet!",
+          activeNodes: ['node-hana-log', 'node-client'],
+          activePaths: ['path-commit-ack'],
+          color: 'emerald',
+          action: () => {
+            showToast("Transaction Committed & Verified by /hana/log");
+          }
+        },
+        {
+          num: 5,
+          title: "Asynchronous Savepoint Engine (Shadow Paging)",
+          desc: "Background Savepoint Coordinator executes (every 300s default). Flushes dirty Delta 1 pages to new, unallocated Shadow Blocks in `/hana/data`.",
+          activeNodes: ['node-cs-delta', 'node-converter', 'node-hana-data'],
+          activePaths: ['path-dirty-to-converter', 'path-savepoint-flush'],
+          color: 'violet',
+          action: () => {
+            SIM.dirtyPages = 0;
+            SIM.dirtyBytesKB = 0;
+            SIM.savepointElapsedSec = 0;
+            SIM.savepointId += 1;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 6,
+          title: "Converter Map Swap & Clean Baseline",
+          desc: "The Page Converter atomically updates the logical-to-physical block pointers and writes the Restart Information Anchor. Dirty blocks are now official persistent baseline.",
+          activeNodes: ['node-converter', 'node-hana-data'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {}
+        }
+      ],
+
+      insert_row: [
+        {
+          num: 1,
+          title: "Row Store SQL Dispatch",
+          desc: "INSERT INTO NRIV (Number Range Catalog). The Query Engine dispatches write execution directly to the Row Engine.",
+          activeNodes: ['node-client', 'node-engine', 'node-rs-mem'],
+          activePaths: ['path-sql-in', 'path-engine-rs'],
+          color: 'amber',
+          action: () => {
+            SIM.rsMemoryMB = parseFloat((SIM.rsMemoryMB + 0.05).toFixed(2));
+            SIM.dirtyPages += 1;
+            SIM.dirtyBytesKB += 4;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 2,
+          title: "In-Place Memory Segment Update & Redo Log Entry",
+          desc: "Tuple slots in the 64 KB Row Store memory pages are updated in-place. A corresponding physical/logical Redo Log Record is queued in the in-memory Log Buffer.",
+          activeNodes: ['node-rs-mem', 'node-log-buffer'],
+          activePaths: ['path-to-wal'],
+          color: 'emerald',
+          action: () => {
+            SIM.lsn += 1;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 3,
+          title: "WAL Flush to /hana/log Segment",
+          desc: "The Logger writes the Row Store redo entry to `/hana/log` using synchronous direct I/O, ensuring zero transaction loss if power fails immediately afterward.",
+          activeNodes: ['node-log-buffer', 'node-hana-log'],
+          activePaths: ['path-wal-flush'],
+          color: 'emerald',
+          action: () => {}
+        },
+        {
+          num: 4,
+          title: "Client ACK Received",
+          desc: "Application receives confirmation that the Number Range has been updated. The Row Store change is persistent in WAL, though data volume blocks remain unchanged.",
+          activeNodes: ['node-hana-log', 'node-client'],
+          activePaths: ['path-commit-ack'],
+          color: 'emerald',
+          action: () => {
+            showToast("Row Store Record Committed");
+          }
+        },
+        {
+          num: 5,
+          title: "Savepoint Row Store Page Flush",
+          desc: "Savepoint writes all dirty Row Store 64 KB memory pages to shadow blocks in `/hana/data`. The Row Engine Converter updates physical block mappings.",
+          activeNodes: ['node-rs-mem', 'node-converter', 'node-hana-data'],
+          activePaths: ['path-dirty-to-converter', 'path-savepoint-flush'],
+          color: 'violet',
+          action: () => {
+            SIM.dirtyPages = 0;
+            SIM.dirtyBytesKB = 0;
+            SIM.savepointElapsedSec = 0;
+            SIM.savepointId += 1;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 6,
+          title: "Savepoint Anchor Persisted",
+          desc: "Global Savepoint lock released. Row Store persistence is synced with disk data blocks.",
+          activeNodes: ['node-converter', 'node-hana-data'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {}
+        }
+      ],
+
+      trigger_savepoint: [
+        {
+          num: 1,
+          title: "Savepoint Trigger Issued",
+          desc: "Savepoint Coordinator initiates global checkpoint cycle (triggered via 300s timeout or manual `ALTER SYSTEM SAVEPOINT`).",
+          activeNodes: ['node-converter'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {}
+        },
+        {
+          num: 2,
+          title: "Dirty RAM Pages Determination",
+          desc: "The Memory Manager identifies all dirty pages across Column Store Delta, Column Store Main, and Row Store segments.",
+          activeNodes: ['node-cs-delta', 'node-rs-mem', 'node-converter'],
+          activePaths: ['path-dirty-to-converter'],
+          color: 'violet',
+          action: () => {}
+        },
+        {
+          num: 3,
+          title: "Asynchronous Shadow Block Allocation",
+          desc: "Data blocks are written asynchronously to currently free/unallocated blocks on `/hana/data`. Existing active blocks are untouched, so readers never block writers.",
+          activeNodes: ['node-converter', 'node-hana-data'],
+          activePaths: ['path-savepoint-flush'],
+          color: 'violet',
+          action: () => {}
+        },
+        {
+          num: 4,
+          title: "Critical Phase & Block Lock (Milliseconds)",
+          desc: "A brief block lock stops new page allocations for a few milliseconds while the new Savepoint Converter checkpoint map is written to disk.",
+          activeNodes: ['node-converter', 'node-hana-data'],
+          activePaths: ['path-savepoint-flush'],
+          color: 'violet',
+          action: () => {}
+        },
+        {
+          num: 5,
+          title: "Restart Information Written to Header",
+          desc: "HANA writes the Restart Information pointing to the newly validated Savepoint ID and root converter page map anchor.",
+          activeNodes: ['node-hana-data'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {
+            SIM.dirtyPages = 0;
+            SIM.dirtyBytesKB = 0;
+            SIM.savepointElapsedSec = 0;
+            SIM.savepointId += 1;
+            updateTelemetryDisplay();
+            showToast("Global Savepoint successfully flushed to /hana/data");
+          }
+        },
+        {
+          num: 6,
+          title: "Old Shadow Blocks Released to Free List",
+          desc: "Blocks from the predecessor savepoint are marked obsolete and returned to the disk volume block allocation free list for future recycling.",
+          activeNodes: ['node-hana-data'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {}
+        }
+      ],
+
+      delta_merge: [
+        {
+          num: 1,
+          title: "Delta Merge Decision (Auto / Manual)",
+          desc: "Delta store memory footprint exceeded auto-merge threshold. The Table Merge Coordinator initiates merge for ACDOCA.",
+          activeNodes: ['node-cs-delta'],
+          activePaths: [],
+          color: 'cyan',
+          action: () => {}
+        },
+        {
+          num: 2,
+          title: "Delta Store Split: Delta 1 (Frozen) + Delta 2 (Active)",
+          desc: "Existing Delta 1 is locked in read-only mode for merge processing. A brand-new Delta 2 is activated instantly to receive new incoming INSERTs without interruption.",
+          activeNodes: ['node-cs-delta'],
+          activePaths: [],
+          color: 'cyan',
+          action: () => {}
+        },
+        {
+          num: 3,
+          title: "Unified Main Store Generation (Main 1 + Delta 1 → Main 2)",
+          desc: "Engine reads Main 1 + Delta 1, applies dictionary encoding, sorts row IDs, and generates a fresh compressed Main 2 in memory.",
+          activeNodes: ['node-cs-delta'],
+          activePaths: [],
+          color: 'cyan',
+          action: () => {}
+        },
+        {
+          num: 4,
+          title: "Redo Log Entry for Merge Commit",
+          desc: "A special log entry documenting the successful switch from Main 1 to Main 2 is flushed to `/hana/log`.",
+          activeNodes: ['node-log-buffer', 'node-hana-log'],
+          activePaths: ['path-wal-flush'],
+          color: 'emerald',
+          action: () => {
+            SIM.lsn += 1;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 5,
+          title: "Old Main 1 & Delta 1 Dropped from RAM",
+          desc: "References to Main 1 and Delta 1 are discarded. The memory allocator immediately reclaims the duplicated buffer space.",
+          activeNodes: ['node-cs-delta'],
+          activePaths: [],
+          color: 'cyan',
+          action: () => {
+            SIM.csDeltaRows = 12;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 6,
+          title: "Main 2 Flushed to Disk During Savepoint",
+          desc: "The next Savepoint cycle will write the newly created Main 2 pages to `/hana/data`. The Delta Merge cycle is complete.",
+          activeNodes: ['node-converter', 'node-hana-data'],
+          activePaths: ['path-savepoint-flush'],
+          color: 'violet',
+          action: () => {
+            showToast("Delta Merge completed successfully!");
+          }
+        }
+      ],
+
+      crash_recovery: [
+        {
+          num: 1,
+          title: "Indexserver Crash Simulation",
+          desc: "Host power cut or kernel panic occurs. Main memory (RAM) is completely wiped. Only `/hana/data` and `/hana/log` remain intact on disk.",
+          activeNodes: ['node-hana-log', 'node-hana-data'],
+          activePaths: [],
+          color: 'rose',
+          action: () => {
+            SIM.csDeltaRows = 0;
+            SIM.dirtyPages = 0;
+            SIM.dirtyBytesKB = 0;
+            updateTelemetryDisplay();
+            showToast("SIMULATION: Database crashed! Volatile RAM wiped.");
+          }
+        },
+        {
+          num: 2,
+          title: "Restart Phase 1: Read Savepoint Anchor",
+          desc: "Indexserver restarts, opens `/hana/data`, and reads the Restart Information header to load the last known valid Global Savepoint and Converter Page Map.",
+          activeNodes: ['node-hana-data', 'node-converter'],
+          activePaths: [],
+          color: 'violet',
+          action: () => {}
+        },
+        {
+          num: 3,
+          title: "Row Store Reload into Memory",
+          desc: "Row Store pages stored in the last savepoint are reloaded 100% into RAM before accepting queries.",
+          activeNodes: ['node-hana-data', 'node-rs-mem'],
+          activePaths: [],
+          color: 'amber',
+          action: () => {
+            SIM.rsMemoryMB = 78.4;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 4,
+          title: "Restart Phase 2: Redo Phase (Replay /hana/log)",
+          desc: "The Redo Engine reads Redo Log Segments starting from the last savepoint LSN up to the crash point, re-applying every committed INSERT back into memory.",
+          activeNodes: ['node-hana-log', 'node-cs-delta', 'node-rs-mem'],
+          activePaths: ['path-wal-flush'],
+          color: 'emerald',
+          action: () => {
+            SIM.csDeltaRows = 1421;
+            updateTelemetryDisplay();
+          }
+        },
+        {
+          num: 5,
+          title: "Restart Phase 3: Undo Phase (Rollback)",
+          desc: "Any transaction that had write activity replayed during Phase 2 but never received a final COMMIT record is safely rolled back.",
+          activeNodes: ['node-cs-delta', 'node-rs-mem'],
+          activePaths: [],
+          color: 'rose',
+          action: () => {}
+        },
+        {
+          num: 6,
+          title: "System Online & Consistent",
+          desc: "Database is now fully recovered, 100% consistent, and ready to receive client connections without any loss of committed data.",
+          activeNodes: ['node-client', 'node-engine', 'node-cs-delta', 'node-rs-mem'],
+          activePaths: ['path-sql-in'],
+          color: 'emerald',
+          action: () => {
+            showToast("HANA Database Recovery Complete & Consistent!");
+          }
+        }
+      ]
+    };
+
+    // Initialize Simulator
+    function runScenario(key) {
+      if (SIM.timer) clearInterval(SIM.timer);
+      SIM.currentScenario = key;
+      SIM.currentStep = 0;
+      applyStep(0);
+      autoPlayScenario();
+    }
+
+    function autoPlayScenario() {
+      const steps = SCENARIOS[SIM.currentScenario];
+      const speed = parseFloat(document.getElementById('sim-speed').value) || 1;
+      const delayMs = Math.round(2600 / speed);
+
+      SIM.timer = setInterval(() => {
+        if (SIM.currentStep < steps.length - 1) {
+          SIM.currentStep++;
+          applyStep(SIM.currentStep);
+        } else {
+          clearInterval(SIM.timer);
+          SIM.timer = null;
+        }
+      }, delayMs);
+    }
+
+    function manualStepChange(delta) {
+      if (!SIM.currentScenario) return;
+      if (SIM.timer) {
+        clearInterval(SIM.timer);
+        SIM.timer = null;
+      }
+      const newStep = SIM.currentStep + delta;
+      const steps = SCENARIOS[SIM.currentScenario];
+      if (newStep >= 0 && newStep < steps.length) {
+        SIM.currentStep = newStep;
+        applyStep(newStep);
+      }
+    }
+
+    function applyStep(stepIdx) {
+      const steps = SCENARIOS[SIM.currentScenario];
+      if (!steps || !steps[stepIdx]) return;
+      const step = steps[stepIdx];
+
+      // Update Ticker UI
+      document.getElementById('step-number-tag').textContent = `STEP ${step.num} OF ${steps.length}`;
+      document.getElementById('step-title').textContent = step.title;
+      document.getElementById('step-description').textContent = step.desc;
+      document.getElementById('step-progress-label').textContent = `Step ${step.num} / ${steps.length}`;
+
+      // Enable/disable navigation buttons
+      document.getElementById('btn-step-prev').disabled = (stepIdx === 0);
+      document.getElementById('btn-step-next').disabled = (stepIdx === steps.length - 1);
+
+      // Status indicator
+      const badge = document.getElementById('pipeline-status-badge');
+      const text = document.getElementById('pipeline-status-text');
+      badge.className = `px-3 py-1 rounded-full text-xs font-mono font-semibold flex items-center gap-1.5 bg-${step.color}-950 text-${step.color}-300 border border-${step.color}-800`;
+      text.textContent = `Executing: ${step.title}`;
+
+      // Reset all SVG node highlights
+      const allNodes = ['node-client', 'node-engine', 'node-cs-delta', 'node-rs-mem', 'node-log-buffer', 'node-converter', 'node-hana-log', 'node-hana-data'];
+      allNodes.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.querySelector('rect').setAttribute('stroke-width', '1.5');
+          el.classList.remove('pulse-node');
+        }
+      });
+
+      // Reset paths
+      const allPaths = ['path-sql-in', 'path-engine-cs', 'path-engine-rs', 'path-to-wal', 'path-wal-flush', 'path-commit-ack', 'path-savepoint-flush', 'path-dirty-to-converter'];
+      allPaths.forEach(id => {
+        const p = document.getElementById(id);
+        if (p) {
+          p.classList.remove('flow-active', 'flow-active-fast');
+          p.setAttribute('stroke-width', '2');
+        }
+      });
+
+      // Highlight active step nodes
+      step.activeNodes.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+          el.querySelector('rect').setAttribute('stroke-width', '3');
+          el.classList.add('pulse-node');
+        }
+      });
+
+      // Highlight active paths
+      step.activePaths.forEach(id => {
+        const p = document.getElementById(id);
+        if (p) {
+          p.classList.add('flow-active');
+          p.setAttribute('stroke-width', '3.5');
+        }
+      });
+
+      // Execute custom scenario side-effect
+      if (typeof step.action === 'function') {
+        step.action();
+      }
+    }
+
+    function executeCustomSQL() {
+      const sql = document.getElementById('input-custom-sql').value.trim().toUpperCase();
+      if (sql.includes('ACDOCA') || sql.includes('BSEG') || sql.includes('MARA')) {
+        runScenario('insert_column');
+      } else if (sql.includes('NRIV') || sql.includes('USR') || sql.includes('T000')) {
+        runScenario('insert_row');
+      } else if (sql.includes('SAVEPOINT')) {
+        runScenario('trigger_savepoint');
+      } else if (sql.includes('MERGE')) {
+        runScenario('delta_merge');
+      } else {
+        runScenario('insert_column');
+      }
+    }
+
+    function triggerManualSavepoint() {
+      runScenario('trigger_savepoint');
+    }
+
+    function updateTelemetryDisplay() {
+      document.getElementById('telemetry-lsn').textContent = '0x' + SIM.lsn.toString(16).toUpperCase();
+      document.getElementById('telemetry-savepoint-time').textContent = `${SIM.savepointElapsedSec}s ago`;
+      document.getElementById('telemetry-savepoint-counter').textContent = `SP# ${SIM.savepointId}`;
+      document.getElementById('telemetry-dirty-pages').textContent = `${SIM.dirtyPages} Pages (${SIM.dirtyBytesKB} KB)`;
+
+      // SVG dynamic labels
+      const deltaEl = document.getElementById('svg-delta-counter');
+      if (deltaEl) deltaEl.textContent = `Delta Records: ${SIM.csDeltaRows.toLocaleString()} rows`;
+
+      const rowEl = document.getElementById('svg-row-counter');
+      if (rowEl) rowEl.textContent = `RS Segment Load: ${SIM.rsMemoryMB.toFixed(1)} MB`;
+
+      const logEl = document.getElementById('svg-logbuf-counter');
+      if (logEl) logEl.textContent = `Active Buffer: Ring #${SIM.activeLogRing} (${SIM.activeLogRingMB.toFixed(1)} MB)`;
+
+      const convEl = document.getElementById('svg-converter-status');
+      if (convEl) convEl.textContent = `Converter Map: Version ${SIM.savepointId}`;
+    }
+
+    function resetSimulation() {
+      SIM.lsn = 5212705;
+      SIM.savepointId = 8412;
+      SIM.savepointElapsedSec = 42;
+      SIM.dirtyPages = 14;
+      SIM.dirtyBytesKB = 56;
+      SIM.csDeltaRows = 1420;
+      SIM.rsMemoryMB = 78.4;
+      updateTelemetryDisplay();
+      showToast("Telemetry counters reset to baseline");
+    }
+
+    // Tab Navigation Switcher
+    function switchNavTab(tabId) {
+      SIM.activeNav = tabId;
+      ['simulator', 'comparison', 'recovery', 'catalog'].forEach(id => {
+        const panel = document.getElementById(`tab-${id}`);
+        const btn = document.getElementById(`nav-btn-${id}`);
+        if (panel) panel.classList.toggle('hidden', id !== tabId);
+        if (btn) {
+          if (id === tabId) {
+            btn.className = "px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 bg-cyan-600 text-white shadow-sm transition";
+          } else {
+            btn.className = "px-3 py-1.5 rounded-lg font-semibold flex items-center gap-1.5 text-slate-300 hover:text-white transition";
+          }
+        }
+      });
+
+      if (tabId === 'recovery') {
+        scrubRecoveryPhase(document.getElementById('recovery-slider').value);
+      }
+      if (tabId === 'catalog') {
+        renderCatalogTable('m_savepoints');
+      }
+      lucide.createIcons();
+    }
+
+    // Crash Recovery Interactive Phase Details
+    function scrubRecoveryPhase(val) {
+      const phase = parseInt(val, 10);
+      const indicator = document.getElementById('recovery-phase-indicator');
+      const card = document.getElementById('recovery-card-content');
+
+      // Update Slider Labels
+      document.getElementById('rec-label-1').className = phase === 1 ? 'text-cyan-400 font-bold' : 'text-slate-400';
+      document.getElementById('rec-label-2').className = phase === 2 ? 'text-emerald-400 font-bold' : 'text-slate-400';
+      document.getElementById('rec-label-3').className = phase === 3 ? 'text-rose-400 font-bold' : 'text-slate-400';
+
+      if (phase === 1) {
+        indicator.textContent = "Phase 1: Initialization & Savepoint Load";
+        indicator.className = "px-2.5 py-0.5 rounded font-bold bg-violet-950 text-violet-300 border border-violet-800";
+        card.innerHTML = `
+          <div class="flex items-center gap-2.5 mb-2">
+            <span class="p-2 rounded-lg bg-violet-950 text-violet-400 border border-violet-800">
+              <i data-lucide="camera" class="w-4 h-4"></i>
+            </span>
+            <h4 class="text-xs font-bold text-white font-mono">Loading Global Savepoint Anchor & Converter Map</h4>
+          </div>
+          <p class="text-xs text-slate-300 leading-relaxed font-sans">
+            During the initial startup phase, the indexserver accesses <code>/hana/data</code> volumes and locates the last written <strong>Restart Information</strong> record in the data volume header.
+          </p>
+          <ul class="text-xs text-slate-400 space-y-1.5 font-mono pt-2 border-t border-slate-800">
+            <li>• Loads the validated Page Converter map into RAM.</li>
+            <li>• Restores the persistent baseline state as of the exact second the last savepoint occurred.</li>
+            <li>• Loads 100% of Row Store segments into memory before opening network listener ports.</li>
+          </ul>
+        `;
+      } else if (phase === 2) {
+        indicator.textContent = "Phase 2: Redo Phase (Replaying Committed Logs)";
+        indicator.className = "px-2.5 py-0.5 rounded font-bold bg-emerald-950 text-emerald-300 border border-emerald-800";
+        card.innerHTML = `
+          <div class="flex items-center gap-2.5 mb-2">
+            <span class="p-2 rounded-lg bg-emerald-950 text-emerald-400 border border-emerald-800">
+              <i data-lucide="play" class="w-4 h-4"></i>
+            </span>
+            <h4 class="text-xs font-bold text-white font-mono">Replaying /hana/log Segments forward to Point-of-Crash</h4>
+          </div>
+          <p class="text-xs text-slate-300 leading-relaxed font-sans">
+            The Redo Log Engine identifies the Log Sequence Number (LSN) recorded in the savepoint header and opens all newer log segment files in <code>/hana/log</code>.
+          </p>
+          <ul class="text-xs text-slate-400 space-y-1.5 font-mono pt-2 border-t border-slate-800">
+            <li>• Scans log buffers forward to restore missing transactions into memory.</li>
+            <li>• Column store writes are placed back into the in-memory Delta Store.</li>
+            <li>• Row store transactions are re-applied to row store memory segments.</li>
+            <li>• Guarantees Zero RPO (Recovery Point Objective) for all committed work.</li>
+          </ul>
+        `;
+      } else if (phase === 3) {
+        indicator.textContent = "Phase 3: Undo Phase (Rollback In-Flight Work)";
+        indicator.className = "px-2.5 py-0.5 rounded font-bold bg-rose-950 text-rose-300 border border-rose-800";
+        card.innerHTML = `
+          <div class="flex items-center gap-2.5 mb-2">
+            <span class="p-2 rounded-lg bg-rose-950 text-rose-400 border border-rose-800">
+              <i data-lucide="undo-2" class="w-4 h-4"></i>
+            </span>
+            <h4 class="text-xs font-bold text-white font-mono">Rolling Back Uncommitted Active Transactions</h4>
+          </div>
+          <p class="text-xs text-slate-300 leading-relaxed font-sans">
+            Any transaction that was in-flight (uncommitted) when the crash happened has its changes undone to preserve database consistency and ACID isolation.
+          </p>
+          <ul class="text-xs text-slate-400 space-y-1.5 font-mono pt-2 border-t border-slate-800">
+            <li>• Scans internal Transaction Manager for uncommitted transaction IDs.</li>
+            <li>• Reverts row modifications using undo log entries stored in log volumes.</li>
+            <li>• Releases all locks, resets system tables, and opens the system for live client operations.</li>
+          </ul>
+        `;
+      }
+      lucide.createIcons();
+    }
+
+    // Dynamic Catalog Views Renderer
+    function renderCatalogTable(viewName) {
+      const head = document.getElementById('catalog-table-head');
+      const body = document.getElementById('catalog-table-body');
+      const sqlEl = document.getElementById('current-catalog-sql');
+
+      ['m-savepoints', 'm-log', 'm-io', 'm-merge'].forEach(k => {
+        const btn = document.getElementById(`cat-btn-${k}`);
+        if (btn) btn.className = "px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-mono transition";
+      });
+
+      if (viewName === 'm_savepoints') {
+        document.getElementById('cat-btn-m-savepoints').className = "px-2.5 py-1 rounded bg-cyan-600 text-white font-mono font-semibold transition";
+        sqlEl.textContent = "SELECT SAVEPOINT_ID, TOTAL_TIME, FLUSHED_SIZE, CRITICAL_PHASE_DURATION, TRIGGER_REASON FROM SYS.M_SAVEPOINTS ORDER BY SAVEPOINT_ID DESC;";
+        head.innerHTML = `
+          <tr>
+            <th class="p-2.5">SAVEPOINT_ID</th>
+            <th class="p-2.5">DURATION (s)</th>
+            <th class="p-2.5">FLUSHED_SIZE (MB)</th>
+            <th class="p-2.5">CRITICAL_PHASE (s)</th>
+            <th class="p-2.5">TRIGGER_REASON</th>
+          </tr>
+        `;
+        body.innerHTML = SIM.savepoints.map(sp => `
+          <tr class="hover:bg-slate-900/60">
+            <td class="p-2.5 font-bold text-cyan-300">${sp.id}</td>
+            <td class="p-2.5 text-slate-200">${sp.durationSec}</td>
+            <td class="p-2.5 font-bold text-white">${sp.flushedSizeMB} MB</td>
+            <td class="p-2.5 text-emerald-400 font-semibold">${sp.criticalPhaseSec}s</td>
+            <td class="p-2.5 text-violet-300 font-mono">${sp.trigger}</td>
+          </tr>
+        `).join('');
+      } else if (viewName === 'm_log_buffers') {
+        document.getElementById('cat-btn-m-log').className = "px-2.5 py-1 rounded bg-cyan-600 text-white font-mono font-semibold transition";
+        sqlEl.textContent = "SELECT BUFFER_ID, STATE, BUFFER_SIZE, WRITTEN_SIZE, PENDING_FSYNC FROM SYS.M_LOG_BUFFERS;";
+        head.innerHTML = `
+          <tr>
+            <th class="p-2.5">RING_BUFFER_ID</th>
+            <th class="p-2.5">STATE</th>
+            <th class="p-2.5">CAPACITY (MB)</th>
+            <th class="p-2.5">WRITTEN (MB)</th>
+            <th class="p-2.5">FSYNC_IN_FLIGHT</th>
+          </tr>
+        `;
+        body.innerHTML = SIM.logBuffers.map(lb => `
+          <tr class="hover:bg-slate-900/60">
+            <td class="p-2.5 font-bold text-emerald-300">Ring #${lb.ringId}</td>
+            <td class="p-2.5 font-bold ${lb.state.includes('ACTIVE') ? 'text-amber-400' : 'text-slate-400'}">${lb.state}</td>
+            <td class="p-2.5 text-slate-300">${lb.sizeMB} MB</td>
+            <td class="p-2.5 font-semibold text-white">${lb.writtenMB} MB</td>
+            <td class="p-2.5 ${lb.pendingFsync === 'YES' ? 'text-rose-400 font-bold' : 'text-emerald-400'}">${lb.pendingFsync}</td>
+          </tr>
+        `).join('');
+      } else if (viewName === 'm_volume_io') {
+        document.getElementById('cat-btn-m-io').className = "px-2.5 py-1 rounded bg-cyan-600 text-white font-mono font-semibold transition";
+        sqlEl.textContent = "SELECT VOLUME_NAME, TYPE, TOTAL_WRITE_SIZE, AVG_WRITE_LATENCY, IO_PATTERN FROM SYS.M_VOLUME_IO_TOTAL_STATISTICS;";
+        head.innerHTML = `
+          <tr>
+            <th class="p-2.5">VOLUME_PATH</th>
+            <th class="p-2.5">TYPE</th>
+            <th class="p-2.5">TOTAL_WRITTEN</th>
+            <th class="p-2.5">AVG_WRITE_LATENCY</th>
+            <th class="p-2.5">IO_CALL_PATTERN</th>
+          </tr>
+        `;
+        body.innerHTML = SIM.volumeIO.map(io => `
+          <tr class="hover:bg-slate-900/60">
+            <td class="p-2.5 font-bold text-sky-400">${io.volume}</td>
+            <td class="p-2.5 font-bold ${io.type === 'LOG' ? 'text-emerald-400' : 'text-violet-400'}">${io.type}</td>
+            <td class="p-2.5 font-bold text-white">${io.totalWritesMB.toLocaleString()} MB</td>
+            <td class="p-2.5 text-amber-300 font-semibold">${io.avgWriteLatencyMs} ms</td>
+            <td class="p-2.5 text-slate-400">${io.ioPattern}</td>
+          </tr>
+        `).join('');
+      } else if (viewName === 'm_delta_merge') {
+        document.getElementById('cat-btn-m-merge').className = "px-2.5 py-1 rounded bg-cyan-600 text-white font-mono font-semibold transition";
+        sqlEl.textContent = "SELECT TABLE_NAME, DELTA_ROWS, MAIN_ROWS_AFTER, EXEC_TIME_SEC, MEMORY_PEAK, STATUS FROM SYS.M_DELTA_MERGE_STATISTICS;";
+        head.innerHTML = `
+          <tr>
+            <th class="p-2.5">TABLE_NAME</th>
+            <th class="p-2.5">DELTA_ROWS</th>
+            <th class="p-2.5">MAIN_ROWS_AFTER</th>
+            <th class="p-2.5">DURATION (s)</th>
+            <th class="p-2.5">PEAK_MEMORY</th>
+            <th class="p-2.5">STATUS</th>
+          </tr>
+        `;
+        body.innerHTML = SIM.deltaMerges.map(dm => `
+          <tr class="hover:bg-slate-900/60">
+            <td class="p-2.5 font-bold text-cyan-300">${dm.table}</td>
+            <td class="p-2.5 text-amber-300">${dm.deltaRowsBefore.toLocaleString()}</td>
+            <td class="p-2.5 text-slate-200">${dm.mainRowsAfter.toLocaleString()}</td>
+            <td class="p-2.5 text-slate-300">${dm.durationSec}s</td>
+            <td class="p-2.5 font-bold text-rose-300">${dm.memoryPeakGB} GB</td>
+            <td class="p-2.5 font-bold text-emerald-400">${dm.status}</td>
+          </tr>
+        `).join('');
+      }
+    }
+
+    function copyCatalogSQL() {
+      const sql = document.getElementById('current-catalog-sql').textContent;
+      document.execCommand('copy');
+      showToast("Catalog SQL copied to clipboard");
+    }
+
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      const text = document.getElementById('toast-text');
+      text.textContent = msg;
+      toast.classList.remove('translate-y-20', 'opacity-0');
+      toast.classList.add('translate-y-0', 'opacity-100');
+      setTimeout(() => {
+        toast.classList.add('translate-y-20', 'opacity-0');
+        toast.classList.remove('translate-y-0', 'opacity-100');
+      }, 2600);
+    }
+
+    // Interval Timer for Live Telemetry
+    setInterval(() => {
+      SIM.savepointElapsedSec++;
+      if (SIM.savepointElapsedSec >= 300) {
+        SIM.savepointElapsedSec = 0;
+        SIM.savepointId++;
+        SIM.dirtyPages = 0;
+        SIM.dirtyBytesKB = 0;
+        showToast("Automatic 300s scheduled savepoint triggered!");
+      }
+      document.getElementById('telemetry-savepoint-time').textContent = `${SIM.savepointElapsedSec}s ago`;
+      document.getElementById('telemetry-savepoint-counter').textContent = `SP# ${SIM.savepointId}`;
+    }, 1000);
+
+    // Boot on Window Load
+    window.onload = function() {
+      updateTelemetryDisplay();
+      lucide.createIcons();
+    };
+  </script>
+</body>
+</html>
